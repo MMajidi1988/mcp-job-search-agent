@@ -2,7 +2,11 @@
 
 from datetime import UTC, datetime, timedelta
 
-from mcp_job_search.job_utils import deadline_is_still_open, extract_jwt_from_text
+from mcp_job_search.job_utils import (
+    deadline_is_still_open,
+    extract_jwt_from_text,
+    query_matches_searchable,
+)
 
 
 def test_extract_jwt_from_text_prefix() -> None:
@@ -18,3 +22,12 @@ def test_deadline_open_future() -> None:
 def test_deadline_closed_past() -> None:
     past = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert not deadline_is_still_open(past)
+
+
+def test_query_matches_or() -> None:
+    assert query_matches_searchable("python OR java", "We need Java developers")
+    assert not query_matches_searchable("python OR java", "We need Kotlin only")
+
+
+def test_query_matches_empty() -> None:
+    assert query_matches_searchable("", "anything goes")

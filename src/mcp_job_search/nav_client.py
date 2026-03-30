@@ -8,11 +8,13 @@ Authentication is via a signed JWT token (a public token is available for experi
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 
 import httpx
 
-from .job_utils import deadline_is_still_open, extract_jwt_from_text
+from .job_utils import deadline_is_still_open, extract_jwt_from_text, query_matches_searchable
 from .models import JobListing, JobSource
 
 logger = logging.getLogger(__name__)
@@ -21,11 +23,15 @@ logger = logging.getLogger(__name__)
 NAV_MAX_FEED_PAGES = 50
 NAV_PAGE_SIZE = 100
 NAV_ABS_MAX_MATCHES = 5000
+NAV_DEFAULT_LOOKBACK_DAYS = 180
 
 NAV_FEED_BASE_URL = "https://pam-stilling-feed.nav.no"
 NAV_PUBLIC_TOKEN_URL = f"{NAV_FEED_BASE_URL}/api/publicToken"
 NAV_FEED_URL = f"{NAV_FEED_BASE_URL}/api/v1/feed"
-NAV_AD_DETAIL_URL = f"{NAV_FEED_BASE_URL}/api/v1/ads"
+# Full vacancy payload (incl. ad_content). `/api/v1/ads/{uuid}` is not available on this host.
+NAV_FEEDENTRY_DETAIL_URL = f"{NAV_FEED_BASE_URL}/api/v1/feedentry"
+# Public listing page (uuid from feed); see arbeidsplassen.no
+NAV_PUBLIC_JOB_URL_PREFIX = "https://arbeidsplassen.nav.no/stillinger/stilling/"
 
 
 class NAVJobClient:
@@ -63,9 +69,14 @@ class NAVJobClient:
         self,
         max_pages: int = NAV_MAX_FEED_PAGES,
         page_size: int = NAV_PAGE_SIZE,
+        lookback_days: int = NAV_DEFAULT_LOOKBACK_DAYS,
     ) -> list[dict[str, Any]]:
         """Fetch multiple feed pages using `next_url` until exhausted or max_pages."""
         headers = await self._auth_headers()
+        # Feed contains historical state changes. Use If-Modified-Since to start from recent entries.
+        if lookback_days > 0:
+            since = datetime.now(UTC) - timedelta(days=lookback_days)
+            headers["If-Modified-Since"] = format_datetime(since, usegmt=True)
         url: str | None = NAV_FEED_URL
         params: dict[str, str] | None = {"size": str(page_size)}
         all_items: list[dict[str, Any]] = []
@@ -75,13 +86,23 @@ class NAVJobClient:
                 break
             try:
                 response = await self._client.get(url, headers=headers, params=params)
+                if response.status_code == 304:
+                    # No body; retry without conditional headers so we still get a page.
+                    plain_headers = await self._auth_headers()
+                    response = await self._client.get(url, headers=plain_headers, params=params)
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
                 logger.error("NAV feed request failed: %s", e)
                 if e.response.status_code == 401:
                     self._token = None
                     headers = await self._auth_headers()
+                    if lookback_days > 0:
+                        since = datetime.now(UTC) - timedelta(days=lookback_days)
+                        headers["If-Modified-Since"] = format_datetime(since, usegmt=True)
                     response = await self._client.get(url, headers=headers, params=params)
+                    if response.status_code == 304:
+                        plain_headers = await self._auth_headers()
+                        response = await self._client.get(url, headers=plain_headers, params=params)
                     response.raise_for_status()
                 else:
                     raise
@@ -107,7 +128,7 @@ class NAVJobClient:
             Full ad details dict, or None if not found.
         """
         headers = await self._auth_headers()
-        url = f"{NAV_AD_DETAIL_URL}/{uuid}"
+        url = f"{NAV_FEEDENTRY_DETAIL_URL}/{uuid}"
 
         try:
             response = await self._client.get(url, headers=headers)
@@ -143,8 +164,6 @@ class NAVJobClient:
         """
         raw_items = await self.fetch_feed_pages()
         results: list[JobListing] = []
-        query_lower = query.lower()
-
         cap = max_results if max_results > 0 else NAV_ABS_MAX_MATCHES
 
         for item in raw_items:
@@ -155,15 +174,24 @@ class NAVJobClient:
                 continue
 
             # Extract fields from the feed item
-            title = item.get("title", "")
+            title = item.get("title", "") or feed_entry.get("title", "")
             employer_name = ""
-            employer_info = item.get("businessName", "") or item.get("employer", "")
+            employer_info = (
+                feed_entry.get("businessName")
+                or item.get("businessName", "")
+                or item.get("employer", "")
+            )
             if isinstance(employer_info, dict):
                 employer_name = employer_info.get("name", "")
             else:
-                employer_name = str(employer_info)
+                employer_name = str(employer_info or "")
 
-            item_location = item.get("municipal", "") or item.get("county", "")
+            item_location = (
+                feed_entry.get("municipal", "")
+                or feed_entry.get("county", "")
+                or item.get("municipal", "")
+                or item.get("county", "")
+            )
             description = item.get("description", "") or ""
             work_lang = item.get("workLanguage", "") or ""
             occupation = item.get("occupationList", "")
@@ -175,20 +203,29 @@ class NAVJobClient:
             else:
                 occupation = str(occupation) if occupation else ""
 
+            ad_uuid = (
+                feed_entry.get("uuid")
+                or feed_entry.get("id")
+                or item.get("id")
+                or item.get("uuid")
+                or ""
+            )
             ad_url = item.get("link", "") or ""
+            if not ad_url and ad_uuid:
+                ad_url = f"{NAV_PUBLIC_JOB_URL_PREFIX}{ad_uuid}"
             published = item.get("published", "") or ""
             deadline = item.get("applicationDue", "") or ""
-            ad_uuid = feed_entry.get("id", item.get("uuid", ""))
 
             # Apply filters
             if exclude_expired_deadlines and deadline and not deadline_is_still_open(deadline):
                 continue
-            searchable = f"{title} {employer_name} {description} {occupation}".lower()
-            if query_lower and query_lower not in searchable:
+            searchable = f"{title} {employer_name} {description} {occupation}"
+            if not query_matches_searchable(query, searchable):
                 continue
             if location and location.lower() not in item_location.lower():
                 continue
-            if language and language.lower() not in work_lang.lower():
+            # Feed items often omit workLanguage; only enforce language when NAV provides it.
+            if language and work_lang and language.lower() not in work_lang.lower():
                 continue
 
             results.append(

@@ -186,7 +186,7 @@ async def match_cv(
 ) -> str:
     """Search jobs and rank them against your CV (keyword-based).
 
-    This is the beginner-friendly (no API key) matching approach.
+    No external embedding API keys required.
 
     Args:
         cv_path: Path to a text file containing your CV (default: cv.txt).
@@ -222,14 +222,46 @@ async def match_cv(
         logger.error("CV match search failed: %s", e)
         return f"Error searching for jobs: {e}"
 
+    if not jobs and query.strip():
+        try:
+            jobs, notes2, wanted2 = await _search_jobs_raw(
+                query="",
+                location=location,
+                language="",
+                sources=sources,
+                max_results=max_results,
+                exclude_expired_deadlines=True,
+            )
+            if wanted2 is not None:
+                wanted = wanted2
+            notes.extend(notes2)
+            notes.append(
+                "Note: keyword filter returned no jobs; re-ran without keywords so CV ranking can still run."
+            )
+        except Exception as e:
+            logger.error("CV match fallback search failed: %s", e)
+            return f"Error searching for jobs: {e}"
+
     if not jobs:
         msg = "No jobs found to match against your CV."
         if notes:
             msg += "\n\n" + "\n".join(notes)
         return msg
 
-    # Use a few role hints from your CV headline/summary.
-    target_roles = ["software engineer", "backend", "python", "java", "rag", "computer vision"]
+    # Role hints for scoring (English + common tech terms).
+    target_roles = [
+        "software engineer",
+        "backend",
+        "python",
+        "java",
+        "rag",
+        "computer vision",
+        "ai",
+        "ml",
+        "machine learning",
+        "developer",
+        "utvikler",
+    ]
 
     scored = []
     for job in jobs:
@@ -299,9 +331,18 @@ async def get_job_details(job_id: str, source: str = "nav") -> str:
         return f"Error fetching job details: {e}"
 
     if details is None:
-        return f"Job with ID '{job_id}' not found. It may have been removed."
+        return (
+            f"Job with ID '{job_id}' not found via NAV API. "
+            f"If you have a UUID, try opening: https://arbeidsplassen.nav.no/stillinger/stilling/{job_id}"
+        )
 
-    ad = details.get("ad_content", details)
+    ad = details.get("ad_content")
+    if not ad:
+        st = details.get("status", "unknown")
+        return (
+            f"NAV returned metadata only for `{job_id}` (status: {st}). "
+            f"Full text may be unavailable. Open: https://arbeidsplassen.nav.no/stillinger/stilling/{job_id}"
+        )
     title = ad.get("title", "Unknown")
     employer = ad.get("employer", {})
     employer_name = employer.get("name", "Unknown") if isinstance(employer, dict) else str(employer)

@@ -36,6 +36,23 @@ def parse_datetime_loose(value: str) -> datetime | None:
         return None
 
 
+def query_matches_searchable(query: str, searchable: str) -> bool:
+    """Match keyword query against searchable text.
+
+    Supports ``OR`` (case-insensitive): ``python OR java`` matches if either substring appears.
+    If query is empty, matches everything.
+    """
+    if not query or not query.strip():
+        return True
+    q = query.strip()
+    hay = searchable.lower()
+    ql = q.lower()
+    if re.search(r"\s+or\s+", q, flags=re.IGNORECASE):
+        parts = [p.strip().lower() for p in re.split(r"\s+or\s+", q, flags=re.IGNORECASE) if p.strip()]
+        return any(p in hay for p in parts)
+    return ql in hay
+
+
 def deadline_is_still_open(deadline_str: str, now: datetime | None = None) -> bool:
     """True if deadline is missing, ASAP-style, or not before today (UTC date)."""
     now = now or datetime.now(UTC)

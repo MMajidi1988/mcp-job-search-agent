@@ -1,0 +1,47 @@
+---
+description: MCP Job Search Agent — vision, stack, and phased roadmap for Norwegian + multi-source job search
+alwaysApply: true
+---
+
+# MCP Job Search Agent
+
+## Purpose
+
+Build an **MCP server** so any MCP client (Claude Desktop, custom apps) can **search jobs**, **inspect listings**, **track applications** with statuses, and (later) **match a CV** to roles — with a **Norwegian market focus** (Finn.no, NAV, etc.) as a differentiator.
+
+## Mental model
+
+- **MCP** exposes *tools* (functions with schemas) over stdio/HTTP; the LLM calls tools; your Python implements them.
+- **One concern per module**: HTTP to a board → dedicated client (e.g. `nav_client`); persistence → `tracker`; contracts → Pydantic models in `models.py`; registration → `server.py` (`@mcp.tool()`).
+
+## Stack (keep aligned)
+
+- **Server**: `mcp` + FastMCP (see `server.py`).
+- **HTTP**: `httpx` async clients for APIs; respect rate limits and Terms of Use.
+- **Data**: Pydantic models for API responses and tracker rows.
+- **Persistence**: SQLite via `aiosqlite` for applications (upgrade path: PostgreSQL).
+- **Future CV match**: embeddings (`sentence-transformers` or OpenAI) — add when implementing `match_cv`, not before.
+
+## MVP tools (target surface)
+
+| Tool | Role |
+|------|------|
+| `search_jobs` | Aggregate one or more sources (start with NAV public API). |
+| `get_job_details` | Full listing for a known id/source. |
+| `track_application` / updates | Persist pipeline: saved → applied → interviewing → offer/rejected. |
+| `list_applications` | Filter/sort pipeline. |
+| `match_cv` | Score job vs profile (Phase 3). |
+
+## Phased roadmap (reference)
+
+1. **Phase 1** — MCP scaffold, `search_jobs` + `get_job_details` for **one** source (NAV), Claude Desktop config works.
+2. **Phase 2** — Second source (e.g. Finn.no), `track_application`, `list_applications`, SQLite.
+3. **Phase 3** — `match_cv` (embeddings or keywords), richer filters/sorts on search and lists.
+4. **Phase 4** — Polish: README + demo, Docker, tests, GitHub-ready repo.
+
+## Conventions for contributors & AI
+
+- Prefer **adding a new source** as a small client module + wiring in `search_jobs` rather than bloating one file.
+- **Scraping**: only where API is unavailable; document legal/ToS constraints in code comments and README.
+- **Tests**: exercise clients with mocked HTTP and tracker with temp DB; keep `pytest-asyncio` patterns consistent with `test_core.py`.
+- **Scope**: portfolio value comes from multi-source aggregation + tracking + clear docs — avoid unrelated refactors.

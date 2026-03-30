@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.pyd
+
+.venv/
+.python-version
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+job_applications.db
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Local CV file (optional)
+cv.txt
+
+# Claude Code local config
+.claude/
